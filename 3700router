@@ -1,13 +1,14 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, math, copy
 
 class Router:
 
-    relations = {}
-    sockets = {}
-    ports = {}
-
+    relations = {} #our relationships. IP : [cust/peer/prov]
+    sockets = {} #our listening UDP connections. IP : socket
+    ports = {} #the port of the neighbor. IP : port
+    route_announcements = []
+    forwarding_table = [] #needs network netmask localpref selfOrigin ASPath origin
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
@@ -18,7 +19,9 @@ class Router:
             self.sockets[neighbor].bind(('localhost', 0))
             self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
-            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor),
+                "dst": neighbor, "msg": {}  }))
+
 
     def our_addr(self, dst):
         quads = list(int(qdn) for qdn in dst.split('.'))
@@ -26,8 +29,129 @@ class Router:
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
     def send(self, network, message):
+        for key in self.relations:
+            if key == network:
+                self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+                return
+        network = self.findProperNetwork(network)
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
+
+    
+    #figures out what kind of message it is and passes it on to the proper handler
+    def handleMessage(self, msg):
+        obj = json.loads(msg)
+        msg_type = obj['type']
+        if(msg_type == "update"):
+            self.handleUpdate(obj)
+        elif(msg_type == "data"):
+            self.handleData(obj)
+        elif(msg_type == "dump"):
+            self.handleDump(obj)
+        return
+
+
+    #handles update message: copy announcement, add entry to forwarding table, send copy of announcement 
+    #TODO: change so that we do not assume that all neighboring routers are customers and 
+    # all network prefixes are disjoint (simplified forwarding table)
+    def handleUpdate(self, msg):
+        self.route_announcements.append(msg) 
+        addr = self.forwarding_table_address(msg['msg']['network'], msg['msg']['netmask'])  
+        if addr != -1:
+            # we must update the routing table entry with this new data
+            return
+        else:
+            print("tbh im finna add this to the forwarding table")
+            print(msg['msg'])
+            obj = msg['msg']
+            obj['src'] = msg['src']
+            self.forwarding_table.append(copy.deepcopy(obj))
+        for item in range(len(self.forwarding_table)):
+            if "src" in self.forwarding_table[item]:
+                self.forwarding_table[item]["peer"] = self.forwarding_table[item].pop("src")
+        if(self.relations[msg['src']] == "cust"):
+            obj = {}
+            obj["type"] = "update"
+            obj["msg"] = {
+                    "network": msg['msg']['network'],
+                    "netmask": msg['msg']['netmask'],
+                    "ASPath": msg['msg']['ASPath']
+                    }
+            obj['msg']['ASPath'].insert(0, self.asn) #add own asn to list
+            for neighbor in self.relations:
+                obj['src']= self.our_addr(neighbor)
+                obj['dst'] = neighbor
+                if obj['dst'] != msg['src']:
+                    self.send(obj['dst'], json.dumps(obj))
+                    #only send updates to customers
+            return
+
+    # return index of matching fw table
+    def forwarding_table_address(self, network, netmask):
+        return -1
+
+
+    # handles data message. TODO: do not assume that all data messages will be valid and legal
+    def handleData(self, msg):
+        obj = {}
+        obj['src'] = self.our_addr(msg['src'])
+        obj['dst'] = msg['dst']
+        neighbor = self.findProperNetwork(msg['dst'])
+        print("I hath received a message from", msg['src'], "and shall forward it to", neighbor)
+        if(neighbor is None):
+            #we can't find the route for this one. Send back with "no route" message.
+            obj['type'] = "no route"
+            obj['msg'] = {}
+            self.send(obj['dst'], json.dumps(obj))
+        else:
+            #obj['dst'] = neighbor
+            obj['type'] = "data"
+            obj['msg'] = msg['msg']
+            self.send(neighbor, json.dumps(obj))
+        
+    #finds correct network to route to via forwarding table. returns None if not found.
+    def findProperNetwork(self, ip):
+        possibleRets = []
+        orig = ip.split(".")
+        for i in range(len(orig)):
+            orig[i] = bin(int(orig[i])).replace("0b","")
+            orig[i] = orig[i].zfill(8)
+        ip = ''.join(orig)
+        for entry in self.forwarding_table:
+            other = entry['network'].split(".")
+            netmask_arr = entry['netmask'].split(".")
+            for i in range(len(other)):
+                other[i] = bin(int(other[i])).replace("0b","")
+                other[i] = other[i].zfill(8)
+            for i in range(len(netmask_arr)):
+                netmask_arr[i] = bin(int(netmask_arr[i])).replace("0b","")
+                netmask_arr[i] = netmask_arr[i].zfill(8)
+            ip2 = ''.join(other)
+            netmask2 = ''.join(netmask_arr)
+            if ip == ip2:
+                return entry
+            for i in range(len(netmask2)):
+                if netmask2[i] == '0' and ip[i-1] == ip2[i-1]:
+                    possibleRets.append((entry, i))
+                    break
+                elif ip[i] != ip2[i]:
+                    break
+                
+        if(len(possibleRets) == 0):
+            return None
+        elif len(possibleRets) == 1:
+            return possibleRets[0][0]['peer']
+        return self.findBestFittingNetwork(possibleRets)
+
+
+
+    #finds the most specific / best fitting route for multiple possibilities.
+    #possibleRets = listof [  (route_table_row, netmask_length)  ]
+    #TODO this
+    def findBestFittingNetwork(self, possibleRets):
+        return possibleRets[0]        
+    
+        
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
@@ -39,9 +163,22 @@ class Router:
                         srcif = sock
                         break
                 msg = k.decode('utf-8')
-
+                self.handleMessage(msg)
                 print("Received message '%s' from %s" % (msg, srcif))
         return
+
+
+    #sends table message to sender of dump message
+    def handleDump(self, msg):
+        toSend = {}
+        toSend['src'] = msg['dst']
+        toSend['dst'] = msg['src']
+        toSend['type'] = "table"
+        toSend['msg'] = self.forwarding_table
+        self.send(toSend['dst'], json.dumps(toSend))
+        return
+
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='route packets')
