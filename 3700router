@@ -61,8 +61,6 @@ class Router:
             # we must update the routing table entry with this new data
             return
         else:
-            print("tbh im finna add this to the forwarding table")
-            print(msg['msg'])
             obj = msg['msg']
             obj['src'] = msg['src']
             self.forwarding_table.append(copy.deepcopy(obj))
@@ -97,7 +95,6 @@ class Router:
         obj['src'] = self.our_addr(msg['src'])
         obj['dst'] = msg['dst']
         neighbor = self.findProperNetwork(msg['dst'])
-        print("I hath received a message from", msg['src'], "and shall forward it to", neighbor)
         if(neighbor is None):
             #we can't find the route for this one. Send back with "no route" message.
             obj['type'] = "no route"
@@ -136,12 +133,11 @@ class Router:
                     break
                 elif ip[i] != ip2[i]:
                     break
-                
         if(len(possibleRets) == 0):
             return None
         elif len(possibleRets) == 1:
             return possibleRets[0][0]['peer']
-        return self.findBestFittingNetwork(possibleRets)
+        return self.findBestFittingNetwork(possibleRets)['peer']
 
 
 
@@ -149,8 +145,40 @@ class Router:
     #possibleRets = listof [  (route_table_row, netmask_length)  ]
     #TODO this
     def findBestFittingNetwork(self, possibleRets):
-        return possibleRets[0]        
+        winner = possibleRets[0]
+        for i in range(len(possibleRets)):
+            contender = possibleRets[i]
+            if(contender[1] > winner[1]):
+                winner = contender
+            elif(contender[0]['localpref'] > winner[0]['localpref']):
+                winner = contender
+            elif(contender[0]['selfOrigin'] and not winner[0]['selfOrigin']):
+                winner = contender
+            elif(len(contender[0]['ASPath']) < len(winner[0]['ASPath'])):
+                winner = contender
+            elif(self.hasBetterOrigin(contender[0]['origin'], winner[0]['origin'])):
+                winner = contender
+            elif(self.ipAddressLower(contender[0]['peer'], winner[0]['peer'])):
+                winner = contender
+        return winner[0]
     
+
+    #is origin 1 better than origin 2?
+    def hasBetterOrigin(self, one, two):
+        if one == 'IGP' and two != 'IGP':
+            return True
+        if one == 'EGP' and two == 'UNK':
+            return True
+        return False
+
+    
+
+    #is ip 1 address lower than ip 2 address?
+    def ipAddressLower(self, one, two):
+        num1 = int(one.replace(".",""))
+        num2 = int(two.replace(".",""))
+        return num1 < num2
+
         
     def run(self):
         while True:
