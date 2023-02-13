@@ -28,10 +28,11 @@ class Router:
         quads[3] = 1
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
-    def send(self, network, message):
+    def send(self, network, message, custOnly = False):
         for key in self.relations:
             if key == network:
-                self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+                if(not custOnly or self.relations.get(key) == "cust"):
+                    self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
                 return
         network = self.findProperNetwork(network)
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
@@ -42,12 +43,15 @@ class Router:
     def handleMessage(self, msg):
         obj = json.loads(msg)
         msg_type = obj['type']
+        self.route_announcements.append(msg) 
         if(msg_type == "update"):
             self.handleUpdate(obj)
         elif(msg_type == "data"):
             self.handleData(obj)
         elif(msg_type == "dump"):
             self.handleDump(obj)
+        elif(msg_type == "withdraw"):
+            self.handleWithdraw(obj)
         return
 
 
@@ -55,7 +59,6 @@ class Router:
     #TODO: change so that we do not assume that all neighboring routers are customers and 
     # all network prefixes are disjoint (simplified forwarding table)
     def handleUpdate(self, msg):
-        self.route_announcements.append(msg) 
         addr = self.forwarding_table_address(msg['msg']['network'], msg['msg']['netmask'])  
         if addr != -1:
             # we must update the routing table entry with this new data
@@ -67,15 +70,15 @@ class Router:
         for item in range(len(self.forwarding_table)):
             if "src" in self.forwarding_table[item]:
                 self.forwarding_table[item]["peer"] = self.forwarding_table[item].pop("src")
-        if(self.relations[msg['src']] == "cust"):
-            obj = {}
-            obj["type"] = "update"
-            obj["msg"] = {
+        obj = {}
+        obj["type"] = "update"
+        obj["msg"] = {
                     "network": msg['msg']['network'],
                     "netmask": msg['msg']['netmask'],
-                    "ASPath": msg['msg']['ASPath']
-                    }
-            obj['msg']['ASPath'].insert(0, self.asn) #add own asn to list
+                    "ASPath": msg['msg']['ASPath']}
+        obj['msg']['ASPath'].insert(0, self.asn) #add own asn to list
+
+        if(self.relations[msg['src']] == "cust"):
             for neighbor in self.relations:
                 obj['src']= self.our_addr(neighbor)
                 obj['dst'] = neighbor
@@ -83,13 +86,19 @@ class Router:
                     self.send(obj['dst'], json.dumps(obj))
                     #only send updates to customers
             return
+        else:
+            for neighbor in self.relations:
+                obj['src']= self.our_addr(neighbor)
+                obj['dst'] = neighbor                
+                if obj['dst'] != msg['src'] and self.relations[obj['dst']] == "cust":
+                    self.send(obj['dst'], json.dumps(obj))
 
     # return index of matching fw table
     def forwarding_table_address(self, network, netmask):
         return -1
 
 
-    # handles data message. TODO: do not assume that all data messages will be valid and legal
+    # handles data message. 
     def handleData(self, msg):
         obj = {}
         obj['src'] = self.our_addr(msg['src'])
@@ -97,13 +106,19 @@ class Router:
         neighbor = self.findProperNetwork(msg['dst'])
         if(neighbor is None):
             #we can't find the route for this one. Send back with "no route" message.
+            obj['dst'] = msg['src']
             obj['type'] = "no route"
             obj['msg'] = {}
             self.send(obj['dst'], json.dumps(obj))
         else:
-            #obj['dst'] = neighbor
+            #if given from customer, send to everyone
+            #if given from peer or provider, only send to customers
+
             obj['type'] = "data"
             obj['msg'] = msg['msg']
+            if(self.relations[self.findProperNetwork(msg['src'])] != 'cust'):
+                self.send(neighbor, json.dumps(obj), True) # only send to customers flag
+                return
             self.send(neighbor, json.dumps(obj))
         
     #finds correct network to route to via forwarding table. returns None if not found.
@@ -133,6 +148,7 @@ class Router:
                     break
                 elif ip[i] != ip2[i]:
                     break
+
         if(len(possibleRets) == 0):
             return None
         elif len(possibleRets) == 1:
@@ -150,17 +166,28 @@ class Router:
             contender = possibleRets[i]
             if(contender[1] > winner[1]):
                 winner = contender
+            elif(contender[1] < winner[1]):
+                continue
             elif(contender[0]['localpref'] > winner[0]['localpref']):
                 winner = contender
+            elif(contender[0]['localpref'] < winner[0]['localpref']):
+                continue
             elif(contender[0]['selfOrigin'] and not winner[0]['selfOrigin']):
                 winner = contender
+            elif(not contender[0]['selfOrigin'] and winner[0]['selfOrigin']):
+                continue
             elif(len(contender[0]['ASPath']) < len(winner[0]['ASPath'])):
                 winner = contender
+            elif(len(contender[0]['ASPath']) > len(winner[0]['ASPath'])):
+                continue
             elif(self.hasBetterOrigin(contender[0]['origin'], winner[0]['origin'])):
                 winner = contender
+            elif(contender[0]['origin'] != winner[0]['origin']):
+                continue
             elif(self.ipAddressLower(contender[0]['peer'], winner[0]['peer'])):
                 winner = contender
         return winner[0]
+
     
 
     #is origin 1 better than origin 2?
@@ -178,6 +205,41 @@ class Router:
         num1 = int(one.replace(".",""))
         num2 = int(two.replace(".",""))
         return num1 < num2
+
+
+    #withdraw handler. removes routes from forwarding table and forwards msg if needed
+    def handleWithdraw(self, msg):
+        itemsToRemove = []
+        for item in range(len(self.forwarding_table)):
+            obj = {}
+            obj["network"] = self.forwarding_table[item]["network"]
+            obj["netmask"] = self.forwarding_table[item]["netmask"]
+            if obj in msg["msg"] and msg["src"] == self.forwarding_table[item]["peer"]:
+                itemsToRemove.append(item)
+
+        i = len(self.forwarding_table) - 1
+        while i >= 0:
+            if(i in itemsToRemove):
+                self.forwarding_table.pop(i)
+            i -= 1
+
+        obj = copy.deepcopy(msg)
+        obj['src'] = self.our_addr(msg['src'])
+        if(self.relations[msg['src']] == "cust"):
+            for neighbor in self.relations:
+                obj['dst'] = neighbor
+                if obj['dst'] != msg['src']:
+                    obj['src'] = self.our_addr(neighbor)
+                    self.send(obj['dst'], json.dumps(obj))
+            return
+        else:
+            for neighbor in self.relations:
+                obj['dst'] = neighbor
+                if obj['dst'] != msg['src'] and self.relations[obj['dst']] == "cust":
+                    obj['src'] = self.our_addr(neighbor)
+                    self.send(obj['dst'], json.dumps(obj))
+
+
 
         
     def run(self):
