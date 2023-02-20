@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math, copy
+from textwrap import wrap
 
 class Router:
 
@@ -9,6 +10,7 @@ class Router:
     ports = {} #the port of the neighbor. IP : port
     route_announcements = []
     forwarding_table = [] #needs network netmask localpref selfOrigin ASPath origin
+    aggregated_ips = [] #ips that have been aggregated. {IP1, IP2, NEWIP}, {}. {}, ...
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
@@ -78,6 +80,7 @@ class Router:
                     "ASPath": msg['msg']['ASPath']}
         obj['msg']['ASPath'].insert(0, self.asn) #add own asn to list
 
+        self.agg_fw_table()
         if(self.relations[msg['src']] == "cust"):
             for neighbor in self.relations:
                 obj['src']= self.our_addr(neighbor)
@@ -93,7 +96,7 @@ class Router:
                 if obj['dst'] != msg['src'] and self.relations[obj['dst']] == "cust":
                     self.send(obj['dst'], json.dumps(obj))
 
-    # return index of matching fw table
+    # return index of matching forwarding table index
     def forwarding_table_address(self, network, netmask):
         return -1
 
@@ -159,7 +162,6 @@ class Router:
 
     #finds the most specific / best fitting route for multiple possibilities.
     #possibleRets = listof [  (route_table_row, netmask_length)  ]
-    #TODO this
     def findBestFittingNetwork(self, possibleRets):
         winner = possibleRets[0]
         for i in range(len(possibleRets)):
@@ -239,6 +241,41 @@ class Router:
                     obj['src'] = self.our_addr(neighbor)
                     self.send(obj['dst'], json.dumps(obj))
 
+
+    #handles aggregation of forwarding table
+    #aggregate if 2 or more entires are adjacent + forward to same next-hop router + same attrs
+    def agg_fw_table(self):
+        toRemove = []
+        for i in range(len(self.forwarding_table)):
+            one = self.forwarding_table[i]
+            for j in range(len(self.forwarding_table)):
+                two = self.forwarding_table[j]
+                if i == j:
+                    continue
+                if (one["netmask"] == two["netmask"] and one["localpref"] == two["localpref"] and one["ASPath"] == two["ASPath"] and one["origin"] == two["origin"] and one["selfOrigin"] == two["selfOrigin"] and one["peer"] == two["peer"]):
+                    toRemove.append(j)
+                    one["netmask"] = self.agg_netmasks(one["netmask"])
+        i = len(self.forwarding_table) - 1
+        while i >= 0:
+            if(i in toRemove):
+                self.forwarding_table.pop(i)
+            i -= 1
+
+
+    def agg_netmasks(self, one):
+        one_arr = one.split(".")
+        for i in range(len(one_arr)):
+            one_arr[i] = bin(int(one_arr[i])).replace("0b","")
+            one_arr[i] = one_arr[i].zfill(8)
+        one_bits = ''.join(one_arr)
+        for i in range(len(one_bits)):
+            if one_bits[i] == '0' and one_bits[i-1] == '1':
+                one_bits = one_bits[:i-1] + '0' + one_bits[i:]
+        ret_arr = wrap(one_bits, 8) 
+        for i in range(len(ret_arr)):
+            ret_arr[i] = str(int(ret_arr[i], 2))
+        
+        return '.'.join(ret_arr)
 
 
         
