@@ -119,6 +119,7 @@ class Router:
 
             obj['type'] = "data"
             obj['msg'] = msg['msg']
+
             if(self.relations[self.findProperNetwork(msg['src'])] != 'cust'):
                 self.send(neighbor, json.dumps(obj), True) # only send to customers flag
                 return
@@ -128,6 +129,7 @@ class Router:
     def findProperNetwork(self, ip):
         possibleRets = []
         orig = ip.split(".")
+        temp = ip
         for i in range(len(orig)):
             orig[i] = bin(int(orig[i])).replace("0b","")
             orig[i] = orig[i].zfill(8)
@@ -248,25 +250,38 @@ class Router:
     #aggregate if 2 or more entires are adjacent + forward to same next-hop router + same attrs
     def agg_fw_table(self):
         toRemove = []
+        toAdd = []
         for i in range(len(self.forwarding_table)):
             one = self.forwarding_table[i]
-            for j in range(len(self.forwarding_table)):
+            for j in range(i, len(self.forwarding_table)):
                 two = self.forwarding_table[j]
                 if i == j:
                     continue
                 if (one["netmask"] == two["netmask"] and one["localpref"] == two["localpref"] and one["ASPath"] == two["ASPath"] and one["origin"] == two["origin"] and one["selfOrigin"] == two["selfOrigin"] and one["peer"] == two["peer"]):
-                    toRemove.append(j)
-                    obj = {}
-                    obj["ip1"] = copy.deepcopy(one)
-                    obj["ip2"] = copy.deepcopy(two)
-                    one["netmask"] = self.agg_netmasks(one["netmask"])
-                    obj["new_ip"] = copy.deepcopy(one)
-                    self.aggregated_ips.append({"ip1": one, "ip2": two, "new_ip": obj})
+                    toRemove.append(one)
+                    toRemove.append(two)
+                    ip1 = copy.deepcopy(one)
+                    ip2 = copy.deepcopy(two)
+                    new_ip = copy.deepcopy(one)
+                    new_ip["netmask"] = self.agg_netmasks(one["netmask"])
+                    self.aggregated_ips.append({"ip1": ip1, "ip2": ip2, "new_ip": new_ip})
+                    toAdd.append(new_ip)
         i = len(self.forwarding_table) - 1
         while i >= 0:
-            if(i in toRemove):
+            if(self.forwarding_table[i] in toRemove):
+                print("#" * 40)
+                print("i will now remove this one from agg_fw")
+                print(self.forwarding_table[i])
+                print("#" * 40)
                 self.forwarding_table.pop(i)
             i -= 1
+     #   print("Heres the stuff i be adding")
+     #   print("*" * 40)
+     #   print(toAdd)
+     #   print("*" * 40)
+        self.forwarding_table.extend(toAdd)
+
+
 
 
     def agg_netmasks(self, one):
@@ -286,25 +301,91 @@ class Router:
 
 
     # take withdrawn msg and disaggregate route if necessary
-    def disagg_netmasks(self, obj):
-        for i in range(len(self.aggregated_ips)):
-            idx = self.forwarding_table.index(self.aggregated_ips[i]["new_ip"])
-            if(obj == self.aggregated_ips[i]["ip1"]):
-                #remove new_ip item from forwarding table
-                #replace with ip2
-                #remove object from aggregated_ips because it is now disagreggated
-                self.forwarding_table.pop(idx)
-                self.forwarding_table.append(self.aggregated_ips[i]["ip2"])
-                return
-            if(obj == self.aggregated_ips[i]["ip2"]):
-                #remove new_ip item from forwarding table
-                #replace with ip1
-                #remove object from aggregated_ips because it is now disagreggated
-                self.forwarding_table.pop(idx)
-                self.forwarding_table.append(self.aggregated_ips[i]["ip1"]) 
-                return
+    def disagg_netmasks(self, obj_arr):
+        toAdd = []
+        toRemove = []
+        for obj in obj_arr:
+            for i in range(len(self.aggregated_ips)):
+                idx = -1
+                if self.aggregated_ips[i]["new_ip"] in self.forwarding_table:
+                    idx = self.forwarding_table.index(self.aggregated_ips[i]["new_ip"])
+                if(obj["network"] == self.aggregated_ips[i]["ip1"]["network"] and obj["netmask"] == self.aggregated_ips[i]["ip1"]["netmask"]):
+                    #remove new_ip item from forwarding table
+                    #replace with ip2
+                    #remove object from aggregated_ips because it is now disagreggated
+                    toRemove.append(idx)
+                    toAdd.append(self.aggregated_ips[i]["ip2"])
+                if(obj["network"] == self.aggregated_ips[i]["ip2"]["network"] and obj["netmask"] == self.aggregated_ips[i]["ip2"]["netmask"]):
+                    #remove new_ip item from forwarding table
+                    #replace with ip1
+                    #remove object from aggregated_ips because it is now disagreggated
+                    toRemove.append(idx)
+                    toAdd.append(self.aggregated_ips[i]["ip1"]) 
+            for i in range(len(self.forwarding_table)):
+                if(self.networkIsContainedIn(obj, self.forwarding_table[i])):
+                    print("Network do be contained in", obj, "and", self.forwarding_table[i])
+                    self.forwarding_table[i]["netmask"] = self.updateNetmaskWithExtraOne(self.forwarding_table[i]["netmask"])
+                    print(self.forwarding_table[i]["netmask"])
+                    print("@"* 50)
+        i = len(self.forwarding_table) - 1
+        while i >= 0:
+            if(i in toRemove):
+              #  print("#" * 40)
+              #  print("i will now remove this one from disagg")
+              #  print(self.forwarding_table[i])
+              #  print("#" * 40)
+                self.forwarding_table.pop(i)
+            i -= 1
+      #  print("Heres the stuff i be adding")
+      #  print("*" * 40)
+      #  print(toAdd)
+      #  print("*" * 40)
+        self.forwarding_table.extend(toAdd)
 
 
+    def networkIsContainedIn(self, child, parent):
+        network_child_arr = child['network'].split(".")
+        netmask_child_arr = child['netmask'].split(".")
+        network_parent_arr = parent['network'].split(".")
+        netmask_parent_arr = parent['netmask'].split(".")
+
+        for i in range(len(network_child_arr)):
+            network_child_arr[i] = bin(int(network_child_arr[i])).replace("0b","")
+            network_child_arr[i] = network_child_arr[i].zfill(8)
+            network_parent_arr[i] = bin(int(network_parent_arr[i])).replace("0b","")
+            network_parent_arr[i] = network_parent_arr[i].zfill(8)
+
+        for i in range(len(netmask_parent_arr)):
+            netmask_parent_arr[i] = bin(int(netmask_parent_arr[i])).replace("0b","")
+            netmask_parent_arr[i] = netmask_parent_arr[i].zfill(8)
+        child_ip = ''.join(network_child_arr)
+        parent_ip = ''.join(network_parent_arr)
+        netmask = ''.join(netmask_parent_arr)
+        if parent_ip == child_ip:
+            return True
+        for i in range(len(netmask)):
+            if netmask[i] == '0' and child_ip[i-1] == parent_ip[i-1]:
+                return True
+            elif child_ip[i] != parent_ip[i]:
+                return False
+        return False
+
+    
+
+    def updateNetmaskWithExtraOne(self, orig_str):
+        orig = orig_str.split(".")
+        for i in range(len(orig)):
+            orig[i] = bin(int(orig[i])).replace("0b","")
+            orig[i] = orig[i].zfill(8)
+        netmask = ''.join(orig)
+        idx = netmask.find("0")
+        netmask = netmask[:idx] + "1" + netmask[idx + 1:]
+
+        ret_arr = wrap(netmask, 8) 
+        for i in range(len(ret_arr)):
+            ret_arr[i] = str(int(ret_arr[i], 2))
+        
+        return '.'.join(ret_arr)
         
     def run(self):
         while True:
