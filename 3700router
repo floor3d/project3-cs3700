@@ -225,6 +225,8 @@ class Router:
                 self.forwarding_table.pop(i)
             i -= 1
 
+        self.disagg_netmasks(msg["msg"])
+
         obj = copy.deepcopy(msg)
         obj['src'] = self.our_addr(msg['src'])
         if(self.relations[msg['src']] == "cust"):
@@ -254,7 +256,12 @@ class Router:
                     continue
                 if (one["netmask"] == two["netmask"] and one["localpref"] == two["localpref"] and one["ASPath"] == two["ASPath"] and one["origin"] == two["origin"] and one["selfOrigin"] == two["selfOrigin"] and one["peer"] == two["peer"]):
                     toRemove.append(j)
+                    obj = {}
+                    obj["ip1"] = copy.deepcopy(one)
+                    obj["ip2"] = copy.deepcopy(two)
                     one["netmask"] = self.agg_netmasks(one["netmask"])
+                    obj["new_ip"] = copy.deepcopy(one)
+                    self.aggregated_ips.append({"ip1": one, "ip2": two, "new_ip": obj})
         i = len(self.forwarding_table) - 1
         while i >= 0:
             if(i in toRemove):
@@ -276,6 +283,26 @@ class Router:
             ret_arr[i] = str(int(ret_arr[i], 2))
         
         return '.'.join(ret_arr)
+
+
+    # take withdrawn msg and disaggregate route if necessary
+    def disagg_netmasks(self, obj):
+        for i in range(len(self.aggregated_ips)):
+            idx = self.forwarding_table.index(self.aggregated_ips[i]["new_ip"])
+            if(obj == self.aggregated_ips[i]["ip1"]):
+                #remove new_ip item from forwarding table
+                #replace with ip2
+                #remove object from aggregated_ips because it is now disagreggated
+                self.forwarding_table.pop(idx)
+                self.forwarding_table.append(self.aggregated_ips[i]["ip2"])
+                return
+            if(obj == self.aggregated_ips[i]["ip2"]):
+                #remove new_ip item from forwarding table
+                #replace with ip1
+                #remove object from aggregated_ips because it is now disagreggated
+                self.forwarding_table.pop(idx)
+                self.forwarding_table.append(self.aggregated_ips[i]["ip1"]) 
+                return
 
 
         
