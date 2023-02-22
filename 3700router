@@ -231,7 +231,8 @@ class Router:
                 self.forwarding_table.pop(i)
             i -= 1
         #it is possible that this removed ip has been aggregated. we must then disaggregate it
-        self.disagg_netmasks(msg["msg"])
+        if(len(self.aggregated_ips) > 0):
+            self.disagg_netmasks(msg["msg"])
 
         obj = copy.deepcopy(msg)
         obj['src'] = self.our_addr(msg['src'])
