@@ -59,14 +59,10 @@ class Router:
 
     #handles update message: copy announcement, add entry to forwarding table, send copy of announcement 
     def handleUpdate(self, msg):
-        addr = self.forwarding_table_address(msg['msg']['network'], msg['msg']['netmask'])  
-        if addr != -1:
-            return
-        else:
-            obj = msg['msg']
-            obj['src'] = msg['src']
-            self.forwarding_table.append(copy.deepcopy(obj))
-            # add this record to the forwarding table
+        obj = msg['msg']
+        obj['src'] = msg['src']
+        self.forwarding_table.append(copy.deepcopy(obj))
+        # add this record to the forwarding table
         for item in range(len(self.forwarding_table)):
             # loop through forwarding table and update current records as necessary
             if "src" in self.forwarding_table[item]:
@@ -98,10 +94,6 @@ class Router:
                 if obj['dst'] != msg['src'] and self.relations[obj['dst']] == "cust":
                     self.send(obj['dst'], json.dumps(obj))
 
-    # return index of matching forwarding table index
-    def forwarding_table_address(self, network, netmask):
-        return -1
-
 
     # handles data message. 
     def handleData(self, msg):
@@ -127,6 +119,7 @@ class Router:
                 return
             self.send(neighbor, json.dumps(obj))
         
+
     #finds correct network to route to via forwarding table. returns None if not found.
     def findProperNetwork(self, ip):
         possibleRets = []
@@ -136,6 +129,9 @@ class Router:
             orig[i] = bin(int(orig[i])).replace("0b","")
             orig[i] = orig[i].zfill(8)
         ip = ''.join(orig)
+        #we have just created a binary representation of the ip
+        # we must now compare it to the ips in the forwarding table to see if we can send it
+        # to them
         for entry in self.forwarding_table:
             other = entry['network'].split(".")
             netmask_arr = entry['netmask'].split(".")
@@ -150,12 +146,15 @@ class Router:
             if ip == ip2:
                 return entry
             for i in range(len(netmask2)):
+                #we check if the ip numbers are equivalent up until the netmask
+                #if so, this network works
                 if netmask2[i] == '0' and ip[i-1] == ip2[i-1]:
                     possibleRets.append((entry, i))
                     break
                 elif ip[i] != ip2[i]:
                     break
 
+        #we may have more than one possible network. in that case we must tie break
         if(len(possibleRets) == 0):
             return None
         elif len(possibleRets) == 1:
@@ -169,6 +168,8 @@ class Router:
     def findBestFittingNetwork(self, possibleRets):
         winner = possibleRets[0]
         for i in range(len(possibleRets)):
+            #compare each possible ret in the list.
+            #use tie breaking formula to see which one wins, then return that one
             contender = possibleRets[i]
             if(contender[1] > winner[1]):
                 winner = contender
@@ -221,6 +222,7 @@ class Router:
             obj["network"] = self.forwarding_table[item]["network"]
             obj["netmask"] = self.forwarding_table[item]["netmask"]
             if obj in msg["msg"] and msg["src"] == self.forwarding_table[item]["peer"]:
+                # found item that must be withdrawn, remove it later (not while iterating)
                 itemsToRemove.append(item)
 
         i = len(self.forwarding_table) - 1
@@ -228,11 +230,12 @@ class Router:
             if(i in itemsToRemove):
                 self.forwarding_table.pop(i)
             i -= 1
-
+        #it is possible that this removed ip has been aggregated. we must then disaggregate it
         self.disagg_netmasks(msg["msg"])
 
         obj = copy.deepcopy(msg)
         obj['src'] = self.our_addr(msg['src'])
+        #send message to other routers as necessary according to our relationships
         if(self.relations[msg['src']] == "cust"):
             for neighbor in self.relations:
                 obj['dst'] = neighbor
@@ -259,6 +262,7 @@ class Router:
                 two = self.forwarding_table[j]
                 if i == j:
                     continue
+                #are this and that network the same? if so, aggregate them
                 if (one["netmask"] == two["netmask"] and one["localpref"] == two["localpref"] and one["ASPath"] == two["ASPath"] and one["origin"] == two["origin"] and one["selfOrigin"] == two["selfOrigin"] and one["peer"] == two["peer"]):
                     toRemove.append(one)
                     toRemove.append(two)
@@ -268,24 +272,18 @@ class Router:
                     new_ip["netmask"] = self.agg_netmasks(one["netmask"])
                     self.aggregated_ips.append({"ip1": ip1, "ip2": ip2, "new_ip": new_ip})
                     toAdd.append(new_ip)
+                    # remove the two to be aggregated, add a new one
         i = len(self.forwarding_table) - 1
         while i >= 0:
             if(self.forwarding_table[i] in toRemove):
-                print("#" * 40)
-                print("i will now remove this one from agg_fw")
-                print(self.forwarding_table[i])
-                print("#" * 40)
                 self.forwarding_table.pop(i)
             i -= 1
-     #   print("Heres the stuff i be adding")
-     #   print("*" * 40)
-     #   print(toAdd)
-     #   print("*" * 40)
         self.forwarding_table.extend(toAdd)
 
 
 
-
+    #calculates aggregated netmask for an aggregated network
+    #simply removes the last 1 from the netmask and replaces it with 0
     def agg_netmasks(self, one):
         one_arr = one.split(".")
         for i in range(len(one_arr)):
@@ -325,32 +323,24 @@ class Router:
                     toAdd.append(self.aggregated_ips[i]["ip1"]) 
             for i in range(len(self.forwarding_table)):
                 if(self.networkIsContainedIn(obj, self.forwarding_table[i])):
-                    print("Network do be contained in", obj, "and", self.forwarding_table[i])
                     self.forwarding_table[i]["netmask"] = self.updateNetmaskWithExtraOne(self.forwarding_table[i]["netmask"])
-                    print(self.forwarding_table[i]["netmask"])
-                    print("@"* 50)
         i = len(self.forwarding_table) - 1
         while i >= 0:
             if(i in toRemove):
-              #  print("#" * 40)
-              #  print("i will now remove this one from disagg")
-              #  print(self.forwarding_table[i])
-              #  print("#" * 40)
                 self.forwarding_table.pop(i)
             i -= 1
-      #  print("Heres the stuff i be adding")
-      #  print("*" * 40)
-      #  print(toAdd)
-      #  print("*" * 40)
         self.forwarding_table.extend(toAdd)
 
 
+    #is child a part of the parent network?
+    # i.e. 128.0.0.0/24 is a part of the network 128.0.1.0.0/8
     def networkIsContainedIn(self, child, parent):
         network_child_arr = child['network'].split(".")
         netmask_child_arr = child['netmask'].split(".")
         network_parent_arr = parent['network'].split(".")
         netmask_parent_arr = parent['netmask'].split(".")
 
+        #convert parent and child networks to binary strings
         for i in range(len(network_child_arr)):
             network_child_arr[i] = bin(int(network_child_arr[i])).replace("0b","")
             network_child_arr[i] = network_child_arr[i].zfill(8)
@@ -374,6 +364,9 @@ class Router:
 
     
 
+    #opposite of aggregation calculus
+    #replace earliest zero with a 1
+    #this is called on disaggregation
     def updateNetmaskWithExtraOne(self, orig_str):
         orig = orig_str.split(".")
         for i in range(len(orig)):
@@ -389,6 +382,18 @@ class Router:
         
         return '.'.join(ret_arr)
         
+
+    #sends table message to sender of dump message
+    def handleDump(self, msg):
+        toSend = {}
+        toSend['src'] = msg['dst']
+        toSend['dst'] = msg['src']
+        toSend['type'] = "table"
+        toSend['msg'] = self.forwarding_table
+        self.send(toSend['dst'], json.dumps(toSend))
+        return
+
+
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
@@ -404,18 +409,6 @@ class Router:
                 print("Received message '%s' from %s" % (msg, srcif))
         return
 
-
-    #sends table message to sender of dump message
-    def handleDump(self, msg):
-        toSend = {}
-        toSend['src'] = msg['dst']
-        toSend['dst'] = msg['src']
-        toSend['type'] = "table"
-        toSend['msg'] = self.forwarding_table
-        self.send(toSend['dst'], json.dumps(toSend))
-        return
-
-    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='route packets')
