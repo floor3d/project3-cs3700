@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math, copy
-from textwrap import wrap
+from textwrap import wrap #used to make strings into arrays
 
 class Router:
 
@@ -45,7 +45,7 @@ class Router:
     def handleMessage(self, msg):
         obj = json.loads(msg)
         msg_type = obj['type']
-        self.route_announcements.append(msg) 
+        self.route_announcements.append(msg) # add this announcement to a running list in case we need it later 
         if(msg_type == "update"):
             self.handleUpdate(obj)
         elif(msg_type == "data"):
@@ -58,20 +58,20 @@ class Router:
 
 
     #handles update message: copy announcement, add entry to forwarding table, send copy of announcement 
-    #TODO: change so that we do not assume that all neighboring routers are customers and 
-    # all network prefixes are disjoint (simplified forwarding table)
     def handleUpdate(self, msg):
         addr = self.forwarding_table_address(msg['msg']['network'], msg['msg']['netmask'])  
         if addr != -1:
-            # we must update the routing table entry with this new data
             return
         else:
             obj = msg['msg']
             obj['src'] = msg['src']
             self.forwarding_table.append(copy.deepcopy(obj))
+            # add this record to the forwarding table
         for item in range(len(self.forwarding_table)):
+            # loop through forwarding table and update current records as necessary
             if "src" in self.forwarding_table[item]:
                 self.forwarding_table[item]["peer"] = self.forwarding_table[item].pop("src")
+        # next step: send a copy of this announcement to other routers as necessary
         obj = {}
         obj["type"] = "update"
         obj["msg"] = {
@@ -80,16 +80,18 @@ class Router:
                     "ASPath": msg['msg']['ASPath']}
         obj['msg']['ASPath'].insert(0, self.asn) #add own asn to list
 
-        self.agg_fw_table()
+        self.agg_fw_table() #aggregate our forwarding table
+
         if(self.relations[msg['src']] == "cust"):
+            #comes from customer 
             for neighbor in self.relations:
                 obj['src']= self.our_addr(neighbor)
                 obj['dst'] = neighbor
                 if obj['dst'] != msg['src']:
                     self.send(obj['dst'], json.dumps(obj))
-                    #only send updates to customers
             return
         else:
+            #comes from peer. We will not send this to other peers because that doesn't make us money
             for neighbor in self.relations:
                 obj['src']= self.our_addr(neighbor)
                 obj['dst'] = neighbor                
